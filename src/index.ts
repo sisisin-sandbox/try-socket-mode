@@ -1,15 +1,23 @@
-import { App, SocketModeReceiver } from '@slack/bolt';
-import { WebClient } from '@slack/web-api';
+import { InstallProvider } from '@slack/oauth';
+import { SocketModeClient } from '@slack/socket-mode';
+import express from 'express';
 import { redis } from './redis';
+import fs from 'fs';
+import https from 'https';
+const key = fs.readFileSync(process.env.PRIV_KEY!, 'utf-8');
+const cert = fs.readFileSync(process.env.CERT!, 'utf-8');
+
+const options = { key, cert };
+const app = express();
+const server = https.createServer(options, app);
+
 const appToken = process.env.SLACK_APP_TOKEN!;
-const socketModeReceiver = new SocketModeReceiver({
-  appToken,
-  clientId: process.env.CLIENT_ID,
-  clientSecret: process.env.CLIENT_SECRET,
+const socketClient = new SocketModeClient({ appToken });
+
+const installer = new InstallProvider({
+  clientId: process.env.CLIENT_ID!,
+  clientSecret: process.env.CLIENT_SECRET!,
   stateSecret: 'my-state-secret',
-  // scopes: ['channels:read', 'channels:history', 'im:history'],
-  scopes: [],
-  installerOptions: { userScopes: ['channels:read', 'channels:history', 'im:history'] },
   installationStore: {
     storeInstallation: async (installation) => {
       if (installation.isEnterpriseInstall && installation.enterprise !== undefined) {
@@ -51,26 +59,43 @@ const socketModeReceiver = new SocketModeReceiver({
   },
 });
 
-const app = new App({
-  receiver: socketModeReceiver,
-  socketMode: true,
-  ignoreSelf: false,
+app.get('/slack/install', async (req, res, next) => {
+  try {
+    const url = await installer.generateInstallUrl({
+      scopes: [],
+      userScopes: ['channels:read', 'channels:history', 'im:history'],
+      metadata: 'some_metadata',
+      redirectUri: 'https://local.sisisin.house:3000/slack/oauth_redirect',
+    });
+
+    res.send(
+      `<a href=${url}><img alt=""Add to Slack"" height="40" width="139" src="https://platform.slack-edge.com/img/add_to_slack.png" srcset="https://platform.slack-edge.com/img/add_to_slack.png 1x, https://platform.slack-edge.com/img/add_to_slack@2x.png 2x" /></a>`,
+    );
+  } catch (error) {
+    res.status(500);
+    console.log(error);
+    res.json({ error: 'some error' });
+  }
 });
-const webClient = new WebClient('', {
-  headers: { Authorization: `Bearer ${appToken}` },
-});
-app.event('message', async ({ client, ...args }) => {
-  const res = await webClient.apps.event.authorizations.list({
-    event_context: args.body.event_context,
-  });
-  console.log('-----------------------------');
-  console.log(args.body.event.subtype === undefined ? args.body.event.text : 'nothing');
-  console.log(res.authorizations);
-  // console.log(args);
-  console.log(args.body.authorizations);
+app.get('/slack/oauth_redirect', async (req, res) => {
+  try {
+    await installer.handleCallback(req, res);
+  } catch (error) {
+    res.status(500);
+    console.log(error);
+    res.json({ error: 'some error' });
+  }
 });
 
-(async () => {
-  await app.start();
-  console.log('⚡️ Bolt app started');
-})();
+socketClient.on('message', (event) => {
+  console.log(event);
+});
+
+async function main() {
+  server.listen(process.env.PORT || 3000, () => {
+    console.log(`server running`);
+  });
+
+  await socketClient.start();
+}
+main().catch((err) => console.error(err));
